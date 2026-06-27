@@ -1,0 +1,71 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  --sg16-primary: #00FF88;
+  --sg16-primary-glow: #22FFAA;
+  --sg16-bg: #050505;
+  --sg16-card: #0F0F0F;
+  --sg16-cyan: #00E5FF;
+}
+
+* {
+  @apply transition-colors duration-200;
+}
+
+body {
+  @apply bg-sg16-dark text-white;
+}
+
+html {
+  background: linear-gradient(135deg, #050505 0%, #0a0a15 100%);
+}
+
+/* Neon Glow Effects */
+.glow-green {
+  box-shadow: 0 0 30px rgba(0, 255, 136, 0.6), 0 0 50px rgba(0, 255, 136, 0.3);
+}
+
+.glow-green-sm {
+  box-shadow: 0 0 15px rgba(0, 255, 136, 0.4);
+}
+
+.glow-cyan {
+  box-shadow: 0 0 25px rgba(0, 229, 255, 0.5);
+}
+
+.neon-text {
+  text-shadow: 0 0 10px rgba(0, 255, 136, 0.8), 0 0 20px rgba(0, 255, 136, 0.4);
+  color: #00FF88;
+}
+
+.gradient-text {
+  @apply bg-gradient-to-r from-sg16-green via-sg16-cyan to-sg16-green bg-clip-text text-transparent font-bold;
+}
+
+/* Background Effects */
+.bg-cosmic {
+  background: linear-gradient(135deg, #050505 0%, #0f0f1f 50%, #050505 100%);
+}
+
+.glass-effect {
+  @apply bg-sg16-card/80 backdrop-blur-md border border-sg16-green/10;
+}
+
+/* Smooth Scrollbar */
+::-webkit-scrollbar {
+  width: 8px;
+}
+
+::-webkit-scrollbar-track {
+  @apply bg-sg16-card;
+}
+
+::-webkit-scrollbar-thumb {
+  @apply bg-sg16-green rounded-full;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  @apply bg-sg16-green-glow;
+}
