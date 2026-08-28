@@ -1,0 +1,15 @@
+{
+  "name": "sg16-transfer",
+  "short_name": "sg16",
+  "description": "Super fast cross-platform file sharing for Android, iPhone and PC.",
+  "start_url": "/",
+  "scope": "/",
+  "display": "standalone",
+  "orientation": "any",
+  "background_color": "#0a0806",
+  "theme_color": "#0a0806",
+  "icons": [
+    { "src": "/icon-512.png", "sizes": "512x512", "type": "image/png", "purpose": "any" },
+    { "src": "/icon-512.png", "sizes": "512x512", "type": "image/png", "purpose": "maskable" }
+  ]
+}
