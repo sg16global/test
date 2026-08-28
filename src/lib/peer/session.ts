@@ -42,6 +42,11 @@ function normalizeCode(raw: string) {
   return raw.trim().toUpperCase().replace(/[^A-Z0-9]/g, "").slice(0, 12);
 }
 
+/**
+ * When the app runs inside the Android APK (Capacitor WebView) there is no
+ * bundled backend, so all `/api/*` calls have to hit the deployed website.
+ * NEXT_PUBLIC_API_BASE lets you override this at build time; otherwise same-origin.
+ */
 const API_BASE =
   typeof process !== "undefined" && process.env && process.env.NEXT_PUBLIC_API_BASE
     ? process.env.NEXT_PUBLIC_API_BASE.replace(/\/$/, "")
@@ -57,6 +62,7 @@ function rid() {
 
 export class TransferSession {
   readonly role: Role;
+  /** Friendly identity advertised to the peer once the tunnel opens. */
   identity: { name: string; device: string } = { name: "", device: "" };
   private events: SessionEvents;
   private pc: RTCPeerConnection | null = null;
@@ -171,8 +177,12 @@ export class TransferSession {
         body: JSON.stringify({ role: this.role, kind, payload }),
         cache: "no-store",
       });
-    } catch {}
+    } catch {
+      /* ignore transient network errors */
+    }
   }
+
+  /* ---------------------------------------------------------------- sender */
 
   async startRoom(name: string, device: string) {
     this.identity = { name, device };
@@ -186,8 +196,10 @@ export class TransferSession {
     this.codeValue = data.code;
     this.events.onCode?.(data.code);
     this.status("waiting", "Share the code — waiting for the other device");
+
     const pc = this.createPeer();
     this.setupChannel(pc.createDataChannel("sg16-transfer", { ordered: true }));
+
     const offer = await pc.createOffer();
     await pc.setLocalDescription(offer);
     await this.patchRoom({ offer: { type: "offer", sdp: pc.localDescription?.sdp ?? offer.sdp } });
@@ -218,7 +230,10 @@ export class TransferSession {
         if (this.pc && !this.pc.currentRemoteDescription) {
           await this.pc.setRemoteDescription({ type: "answer", sdp: answer.sdp });
           this.status("connecting", "Handshake complete — opening fast lane");
-          this.events.onPeer?.({ name: room.receiverName as string | null, device: room.receiverDevice as string | null });
+          this.events.onPeer?.({
+            name: room.receiverName as string | null,
+            device: room.receiverDevice as string | null,
+          });
           return;
         }
       }
@@ -238,12 +253,15 @@ export class TransferSession {
     }
   }
 
+  /* -------------------------------------------------------------- receiver */
+
   async joinRoom(rawCode: string, name: string, device: string) {
     this.identity = { name, device };
     const code = normalizeCode(rawCode);
     if (code.length < 4) throw new Error("Enter the code shown on the sender device");
     this.codeValue = code;
     this.events.onCode?.(code);
+
     let room: Record<string, unknown> | null = null;
     for (let attempt = 0; attempt < 20; attempt += 1) {
       room = await this.fetchRoom();
@@ -252,6 +270,7 @@ export class TransferSession {
       await sleep(600);
     }
     if (!room?.offer) throw new Error("That code is not live right now");
+
     this.status("connecting", "Found the sender — shaking hands");
     const offer = room.offer as { type: string; sdp: string };
     const pc = this.createPeer();
@@ -259,10 +278,19 @@ export class TransferSession {
     await pc.setRemoteDescription({ type: "offer", sdp: offer.sdp });
     const answer = await pc.createAnswer();
     await pc.setLocalDescription(answer);
-    await this.patchRoom({ answer: { type: "answer", sdp: pc.localDescription?.sdp ?? answer.sdp }, name, device });
+    await this.patchRoom({
+      answer: { type: "answer", sdp: pc.localDescription?.sdp ?? answer.sdp },
+      name,
+      device,
+    });
     this.startSignalLoop();
-    this.events.onPeer?.({ name: (room.senderName as string | null) ?? null, device: (room.senderDevice as string | null) ?? null });
+    this.events.onPeer?.({
+      name: (room.senderName as string | null) ?? null,
+      device: (room.senderDevice as string | null) ?? null,
+    });
   }
+
+  /* ------------------------------------------------------- signal polling */
 
   private signalTimer: ReturnType<typeof setTimeout> | null = null;
 
@@ -276,15 +304,23 @@ export class TransferSession {
         const url = api(`/api/rooms/${this.codeValue}/signals?role=${this.role}&after=${this.signalCursor}`);
         const res = await fetch(url, { cache: "no-store" });
         if (res.ok) {
-          const data = (await res.json()) as { items: { id: number; kind: string; payload: { candidate?: RTCIceCandidateInit } }[] };
+          const data = (await res.json()) as {
+            items: { id: number; kind: string; payload: { candidate?: RTCIceCandidateInit } }[];
+          };
           for (const item of data.items) {
             this.signalCursor = Math.max(this.signalCursor, item.id);
             if (item.kind === "candidate" && item.payload?.candidate && this.pc) {
-              try { await this.pc.addIceCandidate(item.payload.candidate); } catch {}
+              try {
+                await this.pc.addIceCandidate(item.payload.candidate);
+              } catch {
+                /* stale candidate */
+              }
             }
           }
         }
-      } catch {}
+      } catch {
+        /* keep polling */
+      }
       if (!this.stopped) this.signalTimer = setTimeout(tick, 600);
     };
     this.signalTimer = setTimeout(tick, 250);
@@ -295,13 +331,18 @@ export class TransferSession {
     this.signalTimer = null;
   }
 
+  /* ----------------------------------------------------- LAN direct tokens */
+
   async createManualOffer() {
     const pc = this.createPeer();
     this.setupChannel(pc.createDataChannel("sg16-transfer", { ordered: true }));
     const offer = await pc.createOffer();
     await pc.setLocalDescription(offer);
     await waitForIce(pc);
-    const token = await packDescription({ type: "offer", sdp: pc.localDescription?.sdp ?? offer.sdp ?? "" });
+    const token = await packDescription({
+      type: "offer",
+      sdp: pc.localDescription?.sdp ?? offer.sdp ?? "",
+    });
     this.status("waiting", "Let the other device scan or paste this code");
     return token;
   }
@@ -327,6 +368,8 @@ export class TransferSession {
     this.status("connecting", "Reply accepted — connecting");
   }
 
+  /* ------------------------------------------------------------ transfers */
+
   async sendFiles(files: File[]) {
     if (files.length === 0) return;
     if (this.dc?.readyState !== "open") {
@@ -334,10 +377,28 @@ export class TransferSession {
       this.log(`${files.length} file(s) queued until the link opens`);
       return;
     }
-    const queue: QueueItem[] = files.map((file) => ({ id: rid(), name: file.name, size: file.size, mime: file.type || "application/octet-stream", file }));
-    this.items = [...this.items, ...queue.map((item) => ({ id: item.id, name: item.name, size: item.size, mime: item.mime, sent: 0, status: "queued" as const, speed: 0 }))];
+    const queue: QueueItem[] = files.map((file) => ({
+      id: rid(),
+      name: file.name,
+      size: file.size,
+      mime: file.type || "application/octet-stream",
+      file,
+    }));
+    this.items = [
+      ...this.items,
+      ...queue.map((item) => ({
+        id: item.id,
+        name: item.name,
+        size: item.size,
+        mime: item.mime,
+        sent: 0,
+        status: "queued" as const,
+        speed: 0,
+      })),
+    ];
     this.emitItems(true);
     this.send({ t: "queue", files: queue.map(({ id, name, size, mime }) => ({ id, name, size, mime })) });
+
     for (const item of queue) {
       const live = this.items.find((entry) => entry.id === item.id);
       if (live) live.status = "sending";
@@ -349,20 +410,33 @@ export class TransferSession {
       let offset = 0;
       const current = this.items.find((entry) => entry.id === item.id);
       let carry: Uint8Array | null = null;
+      // Stream + slice into CHUNK_SIZE frames so we never buffer the whole file.
       while (!this.stopped) {
         const { value, done } = await reader.read();
         if (done && !carry) break;
         const incoming = value ?? new Uint8Array(0);
         let combined: Uint8Array;
-        if (carry) { combined = new Uint8Array(carry.length + incoming.length); combined.set(carry); combined.set(incoming, carry.length); carry = null; } else { combined = incoming; }
+        if (carry) {
+          combined = new Uint8Array(carry.length + incoming.length);
+          combined.set(carry);
+          combined.set(incoming, carry.length);
+          carry = null;
+        } else {
+          combined = incoming;
+        }
         let cursor = 0;
         while (cursor + CHUNK_SIZE <= combined.length) {
-          if (this.dc?.readyState !== "open") { reader.cancel().catch(() => undefined); return; }
+          if (this.dc?.readyState !== "open") {
+            reader.cancel().catch(() => undefined);
+            return;
+          }
           const frame = combined.slice(cursor, cursor + CHUNK_SIZE);
           this.dc.send(frame.buffer as ArrayBuffer);
-          cursor += CHUNK_SIZE; offset += CHUNK_SIZE;
+          cursor += CHUNK_SIZE;
+          offset += CHUNK_SIZE;
           if (current) current.sent = offset;
-          this.tally(CHUNK_SIZE); this.emitItems();
+          this.tally(CHUNK_SIZE);
+          this.emitItems();
           if (this.dc.bufferedAmount > HIGH_WATER) await this.drain();
         }
         const leftover = combined.length - cursor;
@@ -373,14 +447,20 @@ export class TransferSession {
             this.dc.send(tail.buffer as ArrayBuffer);
             offset += tail.byteLength;
             if (current) current.sent = offset;
-            this.tally(tail.byteLength); this.emitItems();
-          } else { carry = combined.slice(cursor); }
+            this.tally(tail.byteLength);
+            this.emitItems();
+          } else {
+            carry = combined.slice(cursor);
+          }
         }
         if (done) break;
       }
       this.send({ t: "end", id: item.id });
       const finished = this.items.find((entry) => entry.id === item.id);
-      if (finished) { finished.status = "done"; finished.speed = file.size / Math.max(1, (Date.now() - started) / 1000); }
+      if (finished) {
+        finished.status = "done";
+        finished.speed = file.size / Math.max(1, (Date.now() - started) / 1000);
+      }
       this.emitItems(true);
       void this.logTransfer(item, Date.now() - started);
     }
@@ -388,12 +468,30 @@ export class TransferSession {
 
   async sendText(text: string) {
     if (!text.trim()) return;
-    if (this.dc?.readyState !== "open") { this.log("Link is not open yet"); return; }
+    if (this.dc?.readyState !== "open") {
+      this.log("Link is not open yet");
+      return;
+    }
     const id = rid();
-    this.items = [...this.items, { id, name: "Shared text", size: text.length, mime: "text/plain", sent: text.length, status: "done", speed: 0, isText: true }];
+    this.items = [
+      ...this.items,
+      {
+        id,
+        name: "Shared text",
+        size: text.length,
+        mime: "text/plain",
+        sent: text.length,
+        status: "done",
+        speed: 0,
+        isText: true,
+      },
+    ];
     this.emitItems(true);
     this.send({ t: "text", body: text });
-    void this.logTransfer({ id, name: "Shared text", size: text.length, mime: "text/plain" }, 50);
+    void this.logTransfer(
+      { id, name: "Shared text", size: text.length, mime: "text/plain" },
+      50,
+    );
   }
 
   private async drain() {
@@ -402,13 +500,20 @@ export class TransferSession {
     if (typeof dc.bufferedAmountLowThreshold === "number" && "onbufferedamountlow" in dc) {
       await new Promise<void>((resolve) => {
         let settled = false;
-        const done = () => { if (settled) return; settled = true; dc.removeEventListener("bufferedamountlow", done); resolve(); };
+        const done = () => {
+          if (settled) return;
+          settled = true;
+          dc.removeEventListener("bufferedamountlow", done);
+          resolve();
+        };
         dc.addEventListener("bufferedamountlow", done);
         setTimeout(done, 700);
       });
       return;
     }
-    while (dc.bufferedAmount > HIGH_WATER && dc.readyState === "open") await sleep(10);
+    while (dc.bufferedAmount > HIGH_WATER && dc.readyState === "open") {
+      await sleep(10);
+    }
   }
 
   private async logTransfer(item: QueueItem, durationMs: number) {
@@ -416,28 +521,80 @@ export class TransferSession {
       await fetch(api("/api/transfers"), {
         method: "POST",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify({ mode: "p2p", fileName: item.name, fileSize: item.size, mimeType: item.mime, senderDevice: this.role === "sender" ? "sender" : "receiver", receiverDevice: this.role === "sender" ? "receiver" : "sender", durationMs, throughputBps: (item.size / Math.max(0.05, durationMs / 1000)), network: navigator.onLine ? "lan" : "offline-lan" }),
+        body: JSON.stringify({
+          mode: "p2p",
+          fileName: item.name,
+          fileSize: item.size,
+          mimeType: item.mime,
+          senderDevice: this.role === "sender" ? "sender" : "receiver",
+          receiverDevice: this.role === "sender" ? "receiver" : "sender",
+          durationMs,
+          throughputBps: (item.size / Math.max(0.05, durationMs / 1000)),
+          network: navigator.onLine ? "lan" : "offline-lan",
+        }),
       });
-    } catch {}
+    } catch {
+      /* offline is fine */
+    }
   }
 
+  /* ------------------------------------------------------------- incoming */
+
   private handleMessage(data: unknown) {
-    if (typeof data !== "string") { this.handleChunk(data as ArrayBuffer); return; }
+    if (typeof data !== "string") {
+      this.handleChunk(data as ArrayBuffer);
+      return;
+    }
     let message: Record<string, unknown>;
-    try { message = JSON.parse(data) as Record<string, unknown>; } catch { return; }
+    try {
+      message = JSON.parse(data) as Record<string, unknown>;
+    } catch {
+      return;
+    }
     const type = message.t as string;
+
     if (type === "queue") {
       const files = (message.files ?? []) as { id: string; name: string; size: number; mime: string }[];
-      this.items = [...this.items, ...files.map((file) => ({ id: file.id, name: file.name, size: file.size, mime: file.mime, sent: 0, status: "queued" as const, speed: 0 }))];
-      this.emitItems(true); return;
+      this.items = [
+        ...this.items,
+        ...files.map((file) => ({
+          id: file.id,
+          name: file.name,
+          size: file.size,
+          mime: file.mime,
+          sent: 0,
+          status: "queued" as const,
+          speed: 0,
+        })),
+      ];
+      this.emitItems(true);
+      return;
     }
+
     if (type === "begin") {
       const id = message.id as string;
       const meta = this.items.find((item) => item.id === id);
       if (meta) meta.status = "sending";
-      this.incoming = { meta: meta ?? { id, name: "file", size: 0, mime: "application/octet-stream", sent: 0, status: "sending", speed: 0 }, parts: [], received: 0, ackAt: 0, startedAt: Date.now() };
-      this.emitItems(true); return;
+      this.incoming = {
+        meta:
+          meta ?? {
+            id,
+            name: "file",
+            size: 0,
+            mime: "application/octet-stream",
+            sent: 0,
+            status: "sending",
+            speed: 0,
+          },
+        parts: [],
+        received: 0,
+        ackAt: 0,
+        startedAt: Date.now(),
+      };
+      this.emitItems(true);
+      return;
     }
+
     if (type === "end") {
       const id = message.id as string;
       const current = this.incoming;
@@ -449,23 +606,48 @@ export class TransferSession {
       current.meta.speed = blob.size / Math.max(0.05, (Date.now() - current.startedAt) / 1000);
       this.emitItems(true);
       this.send({ t: "received", id });
-      this.events.onReceived?.({ id, name: current.meta.name, size: blob.size, mime: current.meta.mime, url: URL.createObjectURL(blob), blob, isText: false });
+      this.events.onReceived?.({
+        id,
+        name: current.meta.name,
+        size: blob.size,
+        mime: current.meta.mime,
+        url: URL.createObjectURL(blob),
+        blob,
+        isText: false,
+      });
       return;
     }
+
     if (type === "hello") {
-      this.events.onPeer?.({ name: typeof message.name === "string" ? message.name : null, device: typeof message.device === "string" ? message.device : null });
+      this.events.onPeer?.({
+        name: typeof message.name === "string" ? message.name : null,
+        device: typeof message.device === "string" ? message.device : null,
+      });
       return;
     }
-    if (type === "text") { this.events.onText?.(String(message.body ?? "")); return; }
+
+    if (type === "text") {
+      const body = String(message.body ?? "");
+      this.events.onText?.(body);
+      return;
+    }
+
     if (type === "ack") {
       const id = message.id as string;
       const meta = this.items.find((item) => item.id === id);
-      if (meta) { meta.sent = Math.max(meta.sent, Number(message.bytes ?? 0)); this.emitItems(true); }
+      if (meta) {
+        meta.sent = Math.max(meta.sent, Number(message.bytes ?? 0));
+        this.emitItems(true);
+      }
       return;
     }
+
     if (type === "received") {
       const meta = this.items.find((item) => item.id === message.id);
-      if (meta) { meta.status = "done"; this.emitItems(true); }
+      if (meta) {
+        meta.status = "done";
+        this.emitItems(true);
+      }
     }
   }
 
@@ -486,9 +668,19 @@ export class TransferSession {
   close() {
     this.stopped = true;
     this.stopSignalLoops();
-    try { this.dc?.close(); } catch {}
-    try { this.pc?.close(); } catch {}
-    if (this.codeValue) void fetch(api(`/api/rooms/${this.codeValue}`), { method: "DELETE" }).catch(() => undefined);
+    try {
+      this.dc?.close();
+    } catch {
+      /* noop */
+    }
+    try {
+      this.pc?.close();
+    } catch {
+      /* noop */
+    }
+    if (this.codeValue) {
+      void fetch(api(`/api/rooms/${this.codeValue}`), { method: "DELETE" }).catch(() => undefined);
+    }
     this.status("closed");
   }
 }
@@ -500,7 +692,11 @@ function sleep(ms: number) {
 async function waitForIce(pc: RTCPeerConnection, timeoutMs = 2500) {
   if (pc.iceGatheringState === "complete") return;
   await new Promise<void>((resolve) => {
-    const done = () => { pc.removeEventListener("icegatheringstatechange", done); clearTimeout(timer); resolve(); };
+    const done = () => {
+      pc.removeEventListener("icegatheringstatechange", done);
+      clearTimeout(timer);
+      resolve();
+    };
     const timer = setTimeout(done, timeoutMs);
     pc.addEventListener("icegatheringstatechange", done);
   });
