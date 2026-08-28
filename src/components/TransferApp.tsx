@@ -218,7 +218,6 @@ export function TransferApp() {
           return;
         }
       } catch {
-        /* not a url */
       }
       const cleaned = value.toUpperCase().replace(/[^A-Z0-9]/g, "").slice(0, 12);
       if (value.trim().startsWith("SG16")) {
@@ -272,6 +271,11 @@ export function TransferApp() {
         </div>
         <PromoStrip />
         <PlatformDownloads />
+        <div className="glass-deep-subtle card-pop flex gap-1 rounded-xl p-1">
+          {([["send", "🚀 Send"], ["receive", "📥 Receive"]] as [Mode, string][]).map(([value, label]) => (
+            <button key={value} onClick={() => { if (value !== mode) { sessionRef.current?.close(); sessionRef.current = null; resetState(); setModeOverride(value); } }} className={`flex-1 rounded-lg px-2.5 py-1.5 text-xs font-semibold transition ${mode === value ? "bg-gradient-to-r from-orange-400 via-orange-500 to-amber-500 text-black shadow-[0_0_20px_-6px_rgba(255,120,0,0.7)]" : "text-slate-300 hover:bg-white/5"}`}>{label}</button>
+          ))}
+        </div>
       </header>
       <main className="mx-auto max-w-2xl px-3 pb-8 pt-4 sm:px-4">
         <p className="text-center text-neutral-400">Transfer UI loaded</p>
