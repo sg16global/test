@@ -1,2 +1,13 @@
 [build]
 builder = "DOCKERFILE"
+dockerfilePath = "Dockerfile"
+
+[deploy]
+healthcheckPath = "/api/health"
+healthcheckTimeout = 120
+restartPolicyType = "ON_FAILURE"
+restartPolicyMaxRetries = 5
+
+[build.args]
+NEXT_PUBLIC_SITE_URL = "https://transfer.sg16engine.com"
+NEXT_PUBLIC_API_BASE = "https://transfer.sg16engine.com"
