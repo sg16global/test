@@ -1,2 +1,31 @@
 # dependencies
 node_modules/
+.pnp.*
+
+# next.js
+.next/
+out/
+
+# build / android
+android/www/
+android/app/
+capacitor.config.json
+
+# env
+.env
+.env.local
+.env.*.local
+
+# debug
+npm-debug.log*
+*.tsbuildinfo
+
+# relay file storage
+.relay/
+
+# os
+.DS_Store
+Thumbs.db
+
+# apk artifacts (optional — remove this line if you want APK in git)
+public/downloads/*.apk
